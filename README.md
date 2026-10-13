@@ -129,9 +129,72 @@ node renew.js
 
 ---
 
+## ⏰ Windows 本地定时运行
+
+不想依赖 GitHub Actions？可以让脚本在你自己的电脑上每天定时自动续期。
+
+### 1. 一键安装计划任务
+
+1. 确认 `login.json` 已配置好账号密码（见下方本地运行指南第 3 步）。
+2. **双击运行 `install_task.bat`**，按提示确认即可。
+3. 安装完成后，脚本会询问是否**立即测试运行一次**，建议选 `Y` 验证配置是否正确。
+
+默认配置：**每天中午 12:30** 自动执行，以当前用户身份运行，**无需管理员权限**。
+
+> 如果你希望电脑注销后也能执行，请右键 `install_task.bat` →「以管理员身份运行」，并在命令行追加 `/system` 参数：
+> ```cmd
+> install_task.bat /system
+> ```
+
+### 2. 静默运行原理
+
+计划任务执行时**不会弹出可见的 Chrome 窗口**，但底层仍然使用**有头模式**运行（通过 `--window-position=-32000,-32000` 把窗口移到屏幕外）。
+
+> **为什么不直接开 `HEADLESS=true`？**
+> Cloudflare Turnstile 对纯无头浏览器有更强的检测机制，过盾成功率会显著下降。这也是云端 Actions 版本使用 `xvfb-run`（虚拟显示器）模拟有头环境的原因。本地方案用「窗口移出屏幕」达到了同样的效果——指纹真实，但用户看不见。
+
+### 3. 日志与排查
+
+| 类型 | 位置 |
+| --- | --- |
+| 运行日志 | `logs\renew_年月日.log`（自动清理 30 天前的旧日志） |
+| 结果截图 | `photo\账号名.png` |
+
+常用命令：
+
+```powershell
+# 立即运行一次测试
+schtasks /run /tn "KatabumpAutoRenew"
+
+# 查看任务状态与上次运行结果
+schtasks /query /tn "KatabumpAutoRenew" /v /fo list
+
+# 卸载定时任务
+schtasks /delete /tn "KatabumpAutoRenew" /f
+```
+
+### 4. 错过执行怎么办
+
+任务已配置 `StartWhenAvailable`：如果 12:30 时电脑处于关机或休眠状态，**开机后 Windows 会自动补跑一次**，不会因为错过时间点而漏掉续期。
+
+### 5. 需要代理时
+
+编辑 `run_renew.ps1`，取消这两行的注释并填入你的代理地址：
+
+```powershell
+$env:HTTP_PROXY = 'http://127.0.0.1:7890'
+$env:HTTPS_PROXY = 'http://127.0.0.1:7890'
+```
+
+---
+
 ## 🛠️ 项目结构
 
 * `renew.js`: Windows 本地运行的主程序。
 * `action_renew.js`: 专门用于 GitHub Actions 环境的脚本（适配 Linux/Headless）。
+* `run_renew.ps1`: 计划任务的执行体（设置静默环境变量、写日志、调用 `renew.js`）。
+* `install_task.bat`: 一键注册 Windows 计划任务的安装脚本。
 * `.github/workflows/renew.yml`: GitHub Actions 的定时任务配置文件。
 * `login.json`: (需手动创建) 存放本地运行的账号信息。
+* `photo/`: 运行截图输出目录。
+* `logs/`: 定时任务日志输出目录。

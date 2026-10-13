@@ -5,3 +5,7 @@ ChromeData_Katabump/
 *.log
 .DS_Store
 photo/
+logs/
+
+# 进程崩溃转储（Git Bash / Cygwin 运行时产生）
+*.stackdump

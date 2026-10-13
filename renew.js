@@ -9,10 +9,25 @@ const http = require('http');
 // 启用 stealth 插件
 chromium.use(stealth);
 
-const CHROME_PATH = "C:\\Users\\Spiral\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe";
+// Chrome 可执行文件路径：优先读环境变量 CHROME_PATH，其次按常见安装位置自动探测。
+// （不要硬编码带用户名的路径，否则换电脑或换 Windows 账户后会失效）
+function detectChromePath() {
+    if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+    const candidates = [
+        process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ].filter(Boolean);
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return candidates[0]; // 都不存在时返回首个候选，后续启动失败会给出明确报错
+}
+const CHROME_PATH = detectChromePath();
 const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
 const DEBUG_PORT = 9222;
-const HEADLESS = false;
+// 是否纯无头运行：默认关闭（真实有头浏览器更容易通过 Cloudflare Turnstile），可用环境变量 HEADLESS=true 覆盖
+const HEADLESS = process.env.HEADLESS === 'true';
 // const HTTP_PROXY = ""
 // --- Proxy Configuration ---
 const HTTP_PROXY = process.env.HTTP_PROXY; // e.g., http://user:pass@1.2.3.4:8080 or http://1.2.3.4:8080
@@ -142,11 +157,16 @@ function checkPort(port) {
     });
 }
 
+// 记录本次运行是否由我们启动了 Chrome（决定结束时是否需要关闭它）
+let chromeLaunchedByUs = false;
+let chromePid = null;
+
 // 辅助函数：启动原生 Chrome
 async function launchNativeChrome() {
     console.log('Checking if Chrome is already running on port ' + DEBUG_PORT + '...');
     if (await checkPort(DEBUG_PORT)) {
         console.log('Chrome is already open.');
+        chromeLaunchedByUs = false; // 复用已有实例，结束时不动它
         return;
     }
 
@@ -168,6 +188,12 @@ async function launchNativeChrome() {
 
     if (HEADLESS) {
         args.push('--headless=new');
+    } else if (process.env.OFFSCREEN === '1') {
+        // 定时任务模式：保持有头运行（Turnstile 对 headless 更敏感），
+        // 但把窗口挪到屏幕外，相当于"隐形"运行，不打扰用户。
+        // 由计划任务包装脚本 run_renew.ps1 设置 OFFSCREEN=1。
+        args.push('--window-position=-32000,-32000');
+        args.push('--window-size=1280,800');
     }
 
     const chrome = spawn(CHROME_PATH, args, {
@@ -175,6 +201,8 @@ async function launchNativeChrome() {
         stdio: 'ignore'
     });
     chrome.unref();
+    chromeLaunchedByUs = true;
+    chromePid = chrome.pid;
 
     console.log('Waiting for Chrome to initialize...');
     for (let i = 0; i < 20; i++) {
@@ -588,6 +616,44 @@ async function attemptTurnstileCdp(page) {
     }
 
     console.log('All users processed.');
-    console.log('Closing browser connection.');
-    await browser.close();
-})();
+
+    // --- 收尾清理 ---
+    // 注意：CDP 连接模式下的 browser.close() 可能永久挂起（它本质是"断开连接"而非关闭浏览器），
+    // 定时任务场景下若卡死会一直占着任务直到超时被强杀，所以这里加超时保护。
+    console.log('Closing browser connection...');
+    try {
+        await Promise.race([
+            browser.close(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
+        ]);
+        console.log('Browser connection closed.');
+    } catch (e) {
+        console.log(`Browser close skipped (${e.message}), continuing cleanup.`);
+    }
+
+    // 关闭由本次运行启动的 Chrome，释放 9222 端口。
+    // 否则下次定时任务会复用这个残留实例（可能已处于异常状态），
+    // 且僵尸 Chrome 会持续占用内存。
+    if (chromeLaunchedByUs && chromePid) {
+        console.log(`Terminating Chrome (PID ${chromePid}) launched by this run...`);
+        try {
+            process.kill(chromePid);
+            console.log('Chrome terminated.');
+        } catch (e) {
+            console.log(`Failed to terminate Chrome: ${e.message}`);
+        }
+    } else {
+        console.log('Chrome was pre-existing; leaving it running.');
+    }
+
+    console.log('Done.');
+})().then(() => {
+    // CDP 连接会留下未释放的 socket 句柄，使 Node 事件循环无法自然清空，
+    // 导致进程"跑完了但一直不退出"。定时任务下这会被误判为仍在运行，
+    // 所以这里显式退出，给出确定的退出码。
+    // 用 setTimeout 让 pending 的 stdout 写入有机会刷出，避免日志被截断。
+    setTimeout(() => process.exit(0), 500);
+}).catch((err) => {
+    console.error('Fatal error:', err);
+    setTimeout(() => process.exit(1), 500);
+});
