@@ -39,15 +39,15 @@
    - `TG_CHAT_ID`: 你的 Chat ID (用户 ID 或群组 ID)。
    > 如果未配置，脚本将跳过发送通知。
 
-### 4. 运行结果与截图
+7. 保存后，进入 **Actions** 页面，启用 Workflow。它会在**每天北京时间 08:00 (UTC 00:00)** 自动运行。
+8. 你也可以手动点击 "Run workflow" 立即测试。
+
+### 运行结果与截图
 
 - **运行日志**: 在 Actions 中的 `Run Renew Script` 步骤查看。
 - **截图留存**: 每次运行（无论成功与否），通过 `Upload Screenshots` 步骤自动上传截图。
   - 你可以在 Workflow 运行详情页的 **Artifacts** 区域下载 `screenshots` 压缩包。
   - 每个账号对应一张截图（`username.png`），方便确认状态。
-
-5. 保存后，进入 **Actions** 页面，启用 Workflow。它会在**每天北京时间 08:00 (UTC 00:00)** 自动运行。
-6. 你也可以手动点击 "Run workflow" 立即测试。
 
 ---
 
@@ -85,26 +85,34 @@ npm install
    > **注意**: `login.json` 已被加入 `.gitignore`，不会被上传到 GitHub，请放心使用。
    >
 
-### 4. 配置 Chrome 路径
+### 4. 运行参数
 
-打开 `renew.js` 文件，找到第 11-12 行：
+**Chrome 路径不用手动配置**：`renew.js` 会依次探测 `CHROME_PATH` 环境变量 → `%LOCALAPPDATA%` → `Program Files` → `Program Files (x86)`。只有当 Chrome 装在非标准位置时，才需要显式指定：
 
-```javascript
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
-const HEADLESS = true;
+```powershell
+$env:CHROME_PATH = '<你的 chrome.exe 完整路径>'
+node renew.js
 ```
 
-* **CHROME_PATH**: 这是你本地 Chrome 浏览器的安装路径。如果你的安装位置不同，请务必修改！
-* **USER_DATA_DIR**:
-  * 这是一个用于存放 Script 运行时产生的浏览器数据（缓存、Cookie、登录状态等）的文件夹。
-  * **作用**: 它能让你的登录状态保持更久，不需要每次运行都重新输入密码。
-  * **能不能删？**: **可以删**。如果你想要重置所有状态（彻底清除缓存），只需删除这个文件夹即可。脚本下次运行时会自动重新创建它。
-* **HEADLESS**:
-  * `false`: 脚本运行时会弹出一个 Chrome 窗口，你可以看到它在做什么。
-  * `true`: (默认)脚本在后台无头运行，界面不可见（适合只想静默完成任务时开启）。
+**浏览器数据目录**（`USER_DATA_DIR`，即项目根目录下的 `ChromeData_Katabump`）：
 
-### 3. 运行脚本
+* 存放脚本运行产生的缓存、Cookie、登录状态等。
+* **作用**: 让登录状态保持更久，不需要每次运行都重新输入密码。
+* **能不能删？**: **可以删**。想要彻底重置状态就删掉这个文件夹，脚本下次运行会自动重建。
+
+**运行模式**（默认有头可见，可用环境变量覆盖）：
+
+| 变量 | 效果 |
+| --- | --- |
+| （不设置） | 弹出可见的 Chrome 窗口，你能看到全部操作过程 |
+| `HEADLESS=true` | 纯无头运行，界面上完全看不见 |
+| `OFFSCREEN=1` | 仍是有头模式，但窗口被移到屏幕外（定时任务用的就是它） |
+
+> 定时任务为什么选 `OFFSCREEN=1` 而不是 `HEADLESS=true`，见下方「静默运行原理」。
+
+**手动调试**：双击 `start_chrome.bat` 会以调试端口 9222 打开 Chrome，并使用与脚本**完全相同**的 `ChromeData_Katabump` 目录。脚本运行时若发现该实例，会复用它，并在结束时关闭。
+
+### 5. 运行脚本
 
 如果你需要使用代理运行脚本，请设置环境变量 `HTTP_PROXY`：
 
@@ -125,7 +133,7 @@ node renew.js
 node renew.js
 ```
 
-脚本会自动启动 Chrome (如果需要)，逐个处理账号，并在根目录下的 `photo/` 文件夹中保存每个账号运行结束时的截图（`账号名.png`）。窗口（默认无头模式为 false，你可以看到操作过程），并依次为列表中的用户续期。
+脚本会自动启动 Chrome（如果还没有实例），逐个处理账号，并在根目录下的 `photo/` 文件夹中保存每个账号运行结束时的截图（`账号名.png`）。默认是有头模式，你能看到操作过程；结束时会关闭自己启动的 Chrome，不会在任务栏留下后台窗口。
 
 ---
 
@@ -198,3 +206,4 @@ $env:HTTPS_PROXY = 'http://127.0.0.1:7890'
 * `login.json`: (需手动创建) 存放本地运行的账号信息。
 * `photo/`: 运行截图输出目录。
 * `logs/`: 定时任务日志输出目录。
+* `start_chrome.bat`: 手动以调试端口 9222 打开 Chrome（与脚本共用同一数据目录）。

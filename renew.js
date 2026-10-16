@@ -157,16 +157,83 @@ function checkPort(port) {
     });
 }
 
-// 记录本次运行是否由我们启动了 Chrome（决定结束时是否需要关闭它）
-let chromeLaunchedByUs = false;
-let chromePid = null;
+// 辅助函数：执行一段 PowerShell 并返回 stdout（调用失败返回空串）
+function runPowerShell(script) {
+    return new Promise((resolve) => {
+        const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+            windowsHide: true,
+        });
+        let out = '';
+        ps.stdout.on('data', (d) => { out += d; });
+        ps.on('error', () => resolve(''));
+        ps.on('close', () => resolve(out.trim()));
+    });
+}
+
+/**
+ * 列出使用“本任务专属 profile”（USER_DATA_DIR）的 chrome.exe 进程。
+ * 用户自己日常使用的 Chrome 跑在默认 profile 下，命令行里不含这个 --user-data-dir，
+ * 因此永远不会命中这里 —— 这是“只关本任务的 Chrome、不动别人的浏览器”的依据。
+ */
+async function listTaskChromePids() {
+    const dir = USER_DATA_DIR.replace(/'/g, "''").replace(/\[/g, '[[]');
+    // Chrome 主进程的命令行里路径是带引号的，子进程往往不带；
+    // 先去掉双引号再比较，否则只会匹配到子进程、真正持有窗口的主进程会漏网。
+    const out = await runPowerShell(
+        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine.Replace('"','') -like '*--user-data-dir=${dir}*' } | ` +
+        `Select-Object -ExpandProperty ProcessId`
+    );
+    return out.split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s)).map(Number);
+}
+
+// 辅助函数：终止单个进程及其所有子进程（/T 连进程树，/F 强制）
+function killProcessTree(pid) {
+    return new Promise((resolve) => {
+        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+            stdio: 'ignore',
+            windowsHide: true,
+        });
+        killer.on('error', () => resolve());
+        killer.on('close', () => resolve());
+    });
+}
+
+/**
+ * 关闭本次任务使用的 Chrome：按 user-data-dir 精确匹配进程并连子进程一起终止，
+ * 多轮复查直到确认清空，避免出现“日志说关了、任务栏却还留一个窗口”的情况。
+ */
+async function closeTaskChrome() {
+    for (let round = 1; round <= 3; round++) {
+        const pids = await listTaskChromePids();
+        if (pids.length === 0) break;
+        console.log(`Closing task Chrome process(es): ${pids.join(', ')}${round > 1 ? ` (round ${round})` : ''}`);
+        for (const pid of pids) await killProcessTree(pid);
+        await new Promise((r) => setTimeout(r, 500));
+    }
+
+    const left = await listTaskChromePids();
+    if (left.length === 0) {
+        console.log('Task Chrome closed. Other Chrome instances were not touched.');
+        return true;
+    }
+    console.log(`WARNING: task Chrome still alive (PID ${left.join(', ')}).`);
+    return false;
+}
 
 // 辅助函数：启动原生 Chrome
 async function launchNativeChrome() {
     console.log('Checking if Chrome is already running on port ' + DEBUG_PORT + '...');
     if (await checkPort(DEBUG_PORT)) {
-        console.log('Chrome is already open.');
-        chromeLaunchedByUs = false; // 复用已有实例，结束时不动它
+        // 9222 已被占用：可能是上次任务残留，也可能是别的实例。
+        // 按 profile 区分——属于本任务目录的会在收尾时一并关闭，别人的实例保持不动。
+        const leftover = await listTaskChromePids();
+        if (leftover.length > 0) {
+            console.log(`Reusing Chrome left over by a previous run (PID ${leftover.join(', ')}). It will be closed at the end.`);
+        } else {
+            console.log('Chrome is already open (external instance). It will be left running.');
+        }
         return;
     }
 
@@ -201,8 +268,6 @@ async function launchNativeChrome() {
         stdio: 'ignore'
     });
     chrome.unref();
-    chromeLaunchedByUs = true;
-    chromePid = chrome.pid;
 
     console.log('Waiting for Chrome to initialize...');
     for (let i = 0; i < 20; i++) {
@@ -212,9 +277,7 @@ async function launchNativeChrome() {
 
     if (!await checkPort(DEBUG_PORT)) {
         console.error('Chrome failed to start on port ' + DEBUG_PORT);
-        if (!checkPort(DEBUG_PORT)) {
-            try { chrome.kill(); } catch (e) { }
-        }
+        await closeTaskChrome(); // 清理启动到一半的进程（仅限本任务 profile）
         throw new Error('Chrome launch failed');
     }
 }
@@ -631,20 +694,11 @@ async function attemptTurnstileCdp(page) {
         console.log(`Browser close skipped (${e.message}), continuing cleanup.`);
     }
 
-    // 关闭由本次运行启动的 Chrome，释放 9222 端口。
-    // 否则下次定时任务会复用这个残留实例（可能已处于异常状态），
-    // 且僵尸 Chrome 会持续占用内存。
-    if (chromeLaunchedByUs && chromePid) {
-        console.log(`Terminating Chrome (PID ${chromePid}) launched by this run...`);
-        try {
-            process.kill(chromePid);
-            console.log('Chrome terminated.');
-        } catch (e) {
-            console.log(`Failed to terminate Chrome: ${e.message}`);
-        }
-    } else {
-        console.log('Chrome was pre-existing; leaving it running.');
-    }
+    // 关闭本次任务使用的 Chrome，释放 9222 端口。
+    // 否则下次定时任务会复用这个残留实例（可能已处于异常状态），且僵尸 Chrome 会持续占用内存。
+    // 这里按本任务专属的 user-data-dir 精确匹配进程并连子进程一起终止：
+    // 既不会像原来的 process.kill(pid) 那样只杀一个进程、留下窗口，也不会误伤用户自己的浏览器。
+    await closeTaskChrome();
 
     console.log('Done.');
 })().then(() => {

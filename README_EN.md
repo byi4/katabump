@@ -37,13 +37,15 @@ This is the easiest way to set it up once and have it run automatically every da
     -   `TG_BOT_TOKEN`: Your Telegram Bot Token (from @BotFather).
     -   `TG_CHAT_ID`: Your Chat ID (User ID or Group ID).
     > If not configured, notifications will be skipped.
-### 4. Results & Screenshots
+7.  Save it. Then, go to the **Actions** tab and enable the workflow. It is scheduled to run automatically at **08:00 Beijing Time (00:00 UTC)**.
+8.  You can also manually click "Run workflow" to test it immediately.
+
+### Results & Screenshots
+
 - **Logs**: Check real-time logs in the `Run Renew Script` step.
 - **Screenshots**: Screenshots are automatically captured for each user (success or failure) and uploaded as artifacts.
   - Download the `screenshots` zip file from the **Artifacts** section of the workflow run summary.
   - Files are named `username.png`.
-5.  Save it. Then, go to the **Actions** tab and enable the workflow. It is scheduled to run automatically at **08:00 Beijing Time (00:00 UTC)**.
-6.  You can also manually click "Run workflow" to test it immediately.
 
 ---
 
@@ -74,23 +76,32 @@ The project contains a `login.json.template` file.
    ```
    > **Note**: `login.json` is included in `.gitignore` and will NOT be uploaded to GitHub.
 
-### 4. Configure Chrome Path
-Open the `renew.js` file and look for lines 11-12:
+### 4. Runtime Settings
 
-```javascript
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
-const HEADLESS = true;
+**No manual Chrome path setup needed**: `renew.js` probes `CHROME_PATH` → `%LOCALAPPDATA%` → `Program Files` → `Program Files (x86)`. Set `CHROME_PATH` explicitly only if Chrome lives somewhere unusual:
+
+```powershell
+$env:CHROME_PATH = '<full path to chrome.exe>'
+node renew.js
 ```
 
-*   **CHROME_PATH**: This is the installation path of your local Chrome browser. Modify this if your installation path is different!
-*   **USER_DATA_DIR**:
-    *   This folder stores browser data generated during script execution (cache, cookies, sessions, etc.).
-    *   **Purpose**: It helps maintain your login session so you don't need to re-enter credentials every time.
-    *   **Can it be deleted?**: **Yes**. If you want to reset all states (clear cache completely), simply delete this folder. The script will recreate it the next time it runs.
-*   **HEADLESS**:
-    *   `false`: The script launches a visible Chrome window so you can see what it's doing.
-    *   `true`: (Default) Runs silently in the background (headless mode), useful if you want it to run without disturbing you.
+**Browser data directory** (`USER_DATA_DIR`, i.e. `ChromeData_Katabump` in the project root):
+
+*   Stores cookies, cache and login state produced by the script.
+*   **Purpose**: keeps your login session so you do not re-enter credentials every run.
+*   **Can it be deleted?**: **Yes**. Delete it to reset all state; the script recreates it on the next run.
+
+**Run modes** (headed and visible by default; override with environment variables):
+
+| Variable | Effect |
+| --- | --- |
+| (unset) | A visible Chrome window, so you can watch every step |
+| `HEADLESS=true` | Fully headless, nothing visible |
+| `OFFSCREEN=1` | Still headed, but the window is moved off-screen (used by the scheduled task) |
+
+> The scheduled task uses `OFFSCREEN=1` rather than `HEADLESS=true` because Cloudflare Turnstile detects pure headless browsers far more aggressively.
+
+**Manual debugging**: double-click `start_chrome.bat` to open Chrome with debug port 9222 on the **same** `ChromeData_Katabump` profile. If the script finds that instance, it reuses it and closes it when finished.
 
 ### 5. Run Script
 
@@ -112,7 +123,7 @@ Or just run without proxy:
 ```bash
 node renew.js
 ```
-The script will auto-launch Chrome (if needed), process each account, and save a screenshot (`username.png`) in the `photo/` directory upon completion.
+The script will auto-launch Chrome (if needed), process each account, and save a screenshot (`username.png`) in the `photo/` directory upon completion. It runs headed by default so you can watch, and closes the Chrome it started when done, leaving no stray windows behind.
 
 ---
 
@@ -122,3 +133,4 @@ The script will auto-launch Chrome (if needed), process each account, and save a
 *   `action_renew.js`: Dedicated script for GitHub Actions environment (Linux/Headless adapted).
 *   `.github/workflows/renew.yml`: Configuration file for GitHub Actions scheduled tasks.
 *   `login.json`: (Manually created) Stores account info for local runs.
+*   `start_chrome.bat`: Opens Chrome with debug port 9222 on the same profile as the script.
